@@ -1,0 +1,195 @@
+#pragma kernel CSLinesGen
+
+#include "../Common.hlsl"
+
+#define LOD_MIN_DISTANCE 15.0
+#define LOD_MAX_DISTANCE 50.0
+
+Texture2D<float4> _EditGrass;     
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<GrassParams> _GrassParams;
+AppendStructuredBuffer<TriangleData> _Triangles;
+
+float3 _WorldSpaceCameraPos;
+float4x4 _ViewProj;
+float3 _ColliderPos;
+float _CullRadius;
+
+int __lodLevel(float3 positionWS) {
+    float dist = distance(positionWS, _WorldSpaceCameraPos);
+    float f = 1.0 - clamp((dist - LOD_MIN_DISTANCE) / (LOD_MAX_DISTANCE - LOD_MIN_DISTANCE), 0.01, 1.00);
+    f = (f*f)*(f*f);
+    int lod = int(round(_GrassParams[0]._Segment * f)); 
+    if (lod < 2) lod = 2; 
+    // return _GrassParams[0]._Segment;
+    return lod;  // 2~_Segment
+}
+
+//视锥剔除
+bool FrustumCull(float3 positionWS, out float4 positionNDC) {
+    positionWS.y += _GrassParams[0]._HEIGHT + 0.1;  // 用草尖的位置
+
+    positionNDC = mul(_ViewProj, float4(positionWS, 1.0));
+    positionNDC /= positionNDC.w;
+
+    const float TOLLERANCE = 0.08;
+    //判断该点是否在 [-1, 1] 的包围盒中
+    bool isInsideFrustum = 
+    positionNDC.x >= (-1.0 - TOLLERANCE) && positionNDC.x <= (1.0 + TOLLERANCE) &&
+    positionNDC.y >= (-1.0 - TOLLERANCE) && positionNDC.y <= (1.0 + TOLLERANCE) &&
+    positionNDC.z >= (-1.0) && positionNDC.z <= (1.0);
+    return !isInsideFrustum;
+}
+
+bool CollisionCull(float3 positionWS) {
+    float dist = distance(positionWS, _ColliderPos);
+    return dist < _CullRadius;
+}
+
+[numthreads(16,16,1)]
+void CSLinesGen(uint3 uid : SV_DispatchThreadID) {
+    int _NUM_SEGS = _GrassParams[0]._Segment;
+    float4 xyzw = _EditGrass[uid.xy];
+
+    // 1. 永远获取正确的 Buffer 索引（因为 CSInit 无论如何都会传过来）
+    uint globalIndex = xyzw.w;
+
+    // 2. 【终极处决】：读取 y 通道的生死标记
+    if (xyzw.y < -9000.0) {
+        // 发现标记为 -9999 的死亡网格！
+        // 必须亲自把这个坑位里的老数据“清零”，防止它变成幽灵草！
+        _Lines[globalIndex].realSeg = 0;   // 你的 Vertex Shader 里有对 realSeg 的剔除
+        _Lines[globalIndex].isPhysic = 0;  // 彻底关闭物理
+        return; // 杀完之后再下班
+    }
+
+    float3 positionWS = xyzw.xyz;  // 0~1
+    float4 positionNDC;
+
+    if (FrustumCull(positionWS, positionNDC) || CollisionCull(positionWS)) {
+        LineData invalidLine;                       // 先声明
+        invalidLine.isPhysic = 0;                   // 哨兵标记
+        invalidLine.realSeg = 0;    
+        // 把 vertices[] 全部清零
+        for (int k = 0; k < _NUM_SEGS; k++) {
+            // MAX_SEGMENTS 就是你用的 _NUM_SEGS 上限
+            invalidLine.vertices[k].positionWS = 0;
+            invalidLine.vertices[k].positionWSGra = 0;
+            invalidLine.vertices[k].positionWSOri = 0;
+            invalidLine.vertices[k].normalWS   = 0;
+            invalidLine.vertices[k].weight     = 0;
+            invalidLine.vertices[k].length     = 0;
+            invalidLine.vertices[k].movable    = 0;
+            invalidLine.vertices[k].tangentWS    = 0;
+            invalidLine.vertices[k].uv    = 0;
+        }
+
+        _Lines[globalIndex] = invalidLine;
+        return;
+    }
+
+    int lod = __lodLevel(positionWS);
+    int isPhysic = 1;
+    if(lod==_NUM_SEGS) {
+        // 物理仿真
+        isPhysic = 3;
+    }
+    else if(lod<_NUM_SEGS-1 && lod > _NUM_SEGS-3) {
+        // 风力重力
+        isPhysic = 2;
+    }
+    else {
+        // 啥都没有
+        isPhysic = 1;
+    }
+
+    // 1. 从老 Buffer 里读取这根草之前的根部坐标
+    float3 oldPositionWS = _Lines[globalIndex].vertices[0].positionWSOri;
+    int oldLod = _Lines[globalIndex].realSeg; 
+
+    // 2. 检查这根草是否被初始化过（防止游戏刚运行的第一帧全罢工）
+    // 假设刚建好的 Buffer 里 realSeg 是 0
+    bool isInitialized = (_Lines[globalIndex].realSeg > 0); 
+
+    // 3. 计算坐标偏移量
+    float dist = distance(oldPositionWS.xz, positionWS.xz); 
+
+    // 4. 终极判决：
+    if (dist < 0.01 && isInitialized && oldLod == lod) {
+        // 坐标没变，说明它还是原来的那根草！
+        // 直接 return，彻底保留后续内核算出来的物理弯曲状态！
+        return;
+    }
+
+    float height = _GrassParams[0]._HEIGHT + 0.5;
+    float _BODY_H = height / (float)(lod);
+    // 基于世界坐标做哈希（rand3），确保同一位置永远生成相同随机数
+    float3 rnd = (rand3(positionWS) * 2 - 1) * 2;
+    // 将随机数转换为单位圆上的随机角度（rnd.z * PI 是随机弧度）
+    float2 cs = float2(sin(rnd.z * PI), cos(rnd.z * PI));
+    // 切线方向（T）
+    float3 right    = float3(cs.x, 0, cs.y);
+    // 副切线/宽度方向（B）
+    float3 normalWS = float3(-cs.y, 0, cs.x);
+    float3 v0 = positionWS;
+
+    const float _Frequency = 0.2;
+    const float _WaveWidth = 0.5;
+    float2 dir = rnd.xz * 0.8;
+    float randomWave = sin(abs(fmod(dir.x + dir.y, PI)));
+    float curvation = (randomWave + 0.5) * sign(dot(rnd, normalWS));
+
+    // float curvation = 0;
+    float w1 = 0;
+    float3x3 rot1 = _AngleAxis3x3(w1 * curvation, right);
+    float3 n1 = mul(rot1, normalWS);
+    float3 v1 = v0;
+
+    LineData lin;
+    lin.isPhysic = isPhysic;
+    lin.realSeg = lod;
+
+    // init
+    for(int j=0; j<_NUM_SEGS; j++) {
+        lin.vertices[j].weight = w1;
+        lin.vertices[j].normalWS = n1;
+        lin.vertices[j].positionWS = v1;
+        lin.vertices[j].positionWSGra = v1;
+        lin.vertices[j].positionWSOri = v1;
+        lin.vertices[j].length = 0.0f;
+        lin.vertices[j].movable = 0;
+    }
+
+    // pad new data
+    for(int j=0; j<lod; j++) {
+        float normalizedWeight = (float)(j) / (float)(lod);
+        w1 = pow(normalizedWeight, 2.0);
+
+        rot1 = _AngleAxis3x3(w1 * curvation, right);
+        n1 = mul(rot1, normalWS);
+        float3 offset = mul(rot1, float3(0, _BODY_H, 0));
+        float RestLength = length(offset);
+        float3 tangent = normalize(offset);
+
+        float2 uv = float2(0.5, w1);
+
+        lin.vertices[j].weight = w1;
+        lin.vertices[j].movable = 1;
+        lin.vertices[j].normalWS = n1;
+        lin.vertices[j].positionWS = v1;
+        lin.vertices[j].positionWSGra = v1;
+        lin.vertices[j].positionWSOri = v1;
+        lin.vertices[j].length = RestLength;
+        lin.vertices[j].uv = uv;  // 设置UV
+        lin.vertices[j].tangentWS = float4(tangent, 1.0); // w=1表示右手坐标系
+
+        if(j<2) {
+            lin.vertices[j].movable = 0;
+        }
+        v1 += offset;
+    }
+
+    _Lines[globalIndex] = lin;
+}
+

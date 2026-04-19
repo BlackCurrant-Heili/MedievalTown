@@ -1,0 +1,40 @@
+#pragma kernel CSGravity
+
+#include "../Common.hlsl"
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<GrassParams> _GrassParams;
+float3 _ColliderPos;
+float _ColliderRadius;
+int _GridWidth;
+
+[numthreads(16,16,1)]
+void CSGravity(uint3 uid : SV_DispatchThreadID) {
+    uint globalIndex = uid.y * _GridWidth + uid.x;
+
+    if(_Lines[globalIndex].isPhysic != 3) {
+        return;
+    }
+    LineData lin = _Lines[globalIndex];
+
+    int _NUM_SEGS = _Lines[globalIndex].realSeg;
+    for(int j=0; j<_NUM_SEGS; j++) {
+        if(lin.vertices[j].movable) {
+            float3 CurPos = lin.vertices[j].positionWS;
+            // float3 OldPos = oldlin.vertices[j].positionWS;
+            float3 OldPos = lin.vertices[j].positionWSGra;
+
+            float3 Gravity = float3(0, -0.98f, 0);
+            float dist = distance(CurPos, _ColliderPos);
+            if(dist < _ColliderRadius) {
+                float3 directionVector = CurPos - _ColliderPos;
+                float3 additionalForce = normalize(directionVector) * 3.0f;
+                Gravity += additionalForce;
+            }
+            lin.vertices[j].positionWS = CurPos + exp(-0.5 * 0.0167) * (CurPos - OldPos) + Gravity * pow(0.0167, 2);
+            lin.vertices[j].positionWSGra = CurPos;
+        }
+    }
+
+    _Lines[globalIndex] = lin;
+}

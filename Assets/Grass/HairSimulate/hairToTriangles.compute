@@ -1,0 +1,89 @@
+#pragma kernel CSToTriangles
+
+#include "../Common.hlsl"
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<GrassParams> _GrassParams;
+RWStructuredBuffer<IndirectArgs> _IndirectArgsBuffer;
+AppendStructuredBuffer<TriangleData> _Triangles;
+
+[numthreads(16,16,1)]
+void CSToTriangles(uint3 uid : SV_DispatchThreadID) {
+    uint globalIndex = uid.y*256 + uid.x;
+    LineData lin = _Lines[globalIndex];
+
+    int _NUM_SEGS = _Lines[globalIndex].realSeg;
+    float width = _GrassParams[0]._WIDTH;  // 基础宽度，例如0.1米
+
+    if(globalIndex==0) {
+        _IndirectArgsBuffer[0].numVerticesPerInstance = 0;
+    }
+
+    for(int j=0; j<_NUM_SEGS-1; j++) {
+        if(lin.vertices[j].length==0.0f) {
+            continue;
+        };
+
+        // 当前顶点j和下一个顶点j+1
+        VertexDataLine curr = lin.vertices[j];
+        VertexDataLine next = lin.vertices[j+1];
+
+        // 计算线段方向（切线）
+        float3 segmentDir = normalize(next.positionWS - curr.positionWS);
+
+        // 1. 计算当前顶点的左右偏移点
+        float widthCurr = width * (1 - curr.weight); // 宽度随高度衰减
+        float widthNext = width * (1 - next.weight);
+
+        float3 currLeftPos = curr.positionWS - curr.normalWS * widthCurr;
+        float3 currRightPos = curr.positionWS + curr.normalWS * widthCurr;
+        float3 nextLeftPos = next.positionWS - next.normalWS * widthNext;
+        float3 nextRightPos = next.positionWS + next.normalWS * widthNext;
+
+        // 3. 构建当前线段的两个三角形（组成一个四边形）
+        TriangleData tri1, tri2;
+
+        // 第一个三角形：currRight -> nextRight -> currLeft
+        tri1.vertices[0].positionWS = currRightPos;
+        tri1.vertices[0].normalWS = curr.normalWS;
+        tri1.vertices[0].weight = curr.weight;
+        tri1.vertices[0].uv = float2(1.0, curr.uv.y); // 右边缘U=1
+        tri1.vertices[0].tangentWS = float4(segmentDir, 1.0);
+
+        tri1.vertices[1].positionWS = nextRightPos;
+        tri1.vertices[1].normalWS = next.normalWS;
+        tri1.vertices[1].weight = next.weight;
+        tri1.vertices[1].uv = float2(1.0, next.uv.y); // 右边缘U=1
+        tri1.vertices[1].tangentWS = float4(segmentDir, 1.0);
+
+        tri1.vertices[2].positionWS = currLeftPos;
+        tri1.vertices[2].normalWS = curr.normalWS;
+        tri1.vertices[2].weight = curr.weight;
+        tri1.vertices[2].uv = float2(0.0, curr.uv.y); // 左边缘U=0
+        tri1.vertices[2].tangentWS = float4(segmentDir, 1.0);
+
+        // 第二个三角形：nextRight -> nextLeft -> currLeft（注意顶点顺序，确保法线朝外）
+        tri2.vertices[0].positionWS = nextRightPos;
+        tri2.vertices[0].normalWS = next.normalWS;
+        tri2.vertices[0].weight = next.weight;
+        tri2.vertices[0].uv = float2(1.0, next.uv.y);
+        tri2.vertices[0].tangentWS = float4(segmentDir, 1.0);
+
+        tri2.vertices[1].positionWS = nextLeftPos;
+        tri2.vertices[1].normalWS = next.normalWS;
+        tri2.vertices[1].weight = next.weight;
+        tri2.vertices[1].uv = float2(0.0, next.uv.y);
+        tri2.vertices[1].tangentWS = float4(segmentDir, 1.0);
+
+        tri2.vertices[2].positionWS = currLeftPos;
+        tri2.vertices[2].normalWS = curr.normalWS;
+        tri2.vertices[2].weight = curr.weight;
+        tri2.vertices[2].uv = float2(0.0, curr.uv.y);
+        tri2.vertices[2].tangentWS = float4(segmentDir, 1.0);
+
+        // 4. 将三角形添加到输出缓冲区
+        _Triangles.Append(tri1);
+        _Triangles.Append(tri2);
+        InterlockedAdd(_IndirectArgsBuffer[0].numVerticesPerInstance, 6);
+    }
+} 

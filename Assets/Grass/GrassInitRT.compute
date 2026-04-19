@@ -1,0 +1,68 @@
+#pragma kernel CSInit
+
+#include "Math.hlsl"
+
+RWTexture2D<float4> _InitGrass;
+Texture2D<float> _TerrainHeightMap;
+SamplerState sampler_TerrainHeightMap;
+Texture2D<float4> _SplatMap;      // 草地层权重图（0-1）
+SamplerState sampler_SplatMap;    // 采样器
+
+float3 _WorldSpaceCameraPos;
+float _GridSpacing; // 比如 0.1 米种一棵草
+int _GridWidth;      // 比如 256
+int _GridLength;     // 比如 256 
+
+float3 _TerrainPos;              // Terrain世界坐标
+float4 _TerrainSize;             // Terrain尺寸 (x, y, z, 0)
+float _GrassThreshold;           // 生成阈值，默认0.3
+
+[numthreads(16,16,1)]
+void CSInit(uint3 uid : SV_DispatchThreadID) {
+    // 1. 获取摄像机所在的“世界整数网格坐标”
+    int camCellX = floor(_WorldSpaceCameraPos.x / _GridSpacing);
+    int camCellZ = floor(_WorldSpaceCameraPos.z / _GridSpacing);
+
+    // 2. 算出当前线程代表的“世界整数网格坐标”
+    int worldCellX = camCellX + (int)uid.x - (_GridWidth / 2);
+    int worldCellZ = camCellZ + (int)uid.y - (_GridLength / 2);
+
+    // 3. 算出真实的物理世界坐标
+    float2 worldXZ = float2(worldCellX * _GridSpacing, worldCellZ * _GridSpacing);
+
+    // 采样地形高度
+    float2 terrainUV = (worldXZ - _TerrainPos.xz) / _TerrainSize.xz;
+    float height = _TerrainHeightMap.SampleLevel(sampler_TerrainHeightMap, terrainUV, 0);
+
+    // 2. 计算在Terrain局部坐标系中的UV
+    float2 localPos = worldXZ - _TerrainPos.xz;
+    float2 uv = localPos / _TerrainSize.xz;
+
+    // 3. 采样Splatmap判断是否是草地
+    float4 grassWeight = _SplatMap.SampleLevel(sampler_SplatMap, uv, 0);
+
+    // 4. 【高阶取模魔法】：必须这样写才能安全处理负数坐标！
+    uint bufferX = (uint)(((worldCellX % _GridWidth) + _GridWidth) % _GridWidth);
+    uint bufferY = (uint)(((worldCellZ % _GridLength) + _GridLength) % _GridLength);
+    uint globalIndex = bufferY * _GridWidth + bufferX;
+    // && grassWeight.x <= 1 - _GrassThreshold && grassWeight.z <= 1 - _GrassThreshold
+
+    // 假设 G 通道 (y) 是草地，R 通道 (x) 是泥土，B 通道 (z) 是石头
+    float grassAmount = grassWeight.y;
+    float dirtAmount = grassWeight.x;
+    float stoneAmount = grassWeight.z;
+
+    // 使用 smoothstep 创建过渡区，避免硬切
+    float isGrass = smoothstep(0.05, 0.15, grassAmount);  // 0.05以下=0, 0.15以上=1
+    float isDirt = smoothstep(0.05, 0.15, dirtAmount);
+    float isStone = step(0.01, stoneAmount);  // 石头可以硬切，因为权重通常很极端
+
+    // 综合判断：草地占主导且石头极少
+    float valid = isGrass * (1.0 - isStone) * (1.0 - isDirt * 0.5);
+
+    if (valid < 0.5) {
+        _InitGrass[uid.xy] = float4(worldXZ.x, -9999, worldXZ.y, globalIndex);
+    } else {
+        _InitGrass[uid.xy] = float4(worldXZ.x, height, worldXZ.y, globalIndex);
+    }
+}

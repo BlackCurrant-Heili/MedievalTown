@@ -1,0 +1,83 @@
+#pragma kernel CSLocal
+
+#include "../Common.hlsl"
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<LineData> _LinesOri;
+RWStructuredBuffer<GrassParams> _GrassParams;
+
+int _GridWidth;
+
+float4 QuatFromTwoUnitVectors(float3 u, float3 v) {
+    float dotProduct = dot(u, v);
+    float4 quat;
+    if (dotProduct < -0.999999f) {
+        // 处理共线且反向的情况，这里简单示例
+        quat = float4(1.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+        float3 crossProduct = cross(u, v);
+        quat.xyz = crossProduct;
+        quat.w = dotProduct + 1.0f;
+        quat = normalize(quat);
+    }
+    return quat;
+}
+
+float3 QuaternionRotate(float4 q, float3 v) {
+    float3 qVec = q.xyz;
+    return v + 2.0f * cross(qVec, cross(qVec, v) + q.w * v);
+}
+
+[numthreads(16,16,1)]
+void CSLocal(uint3 uid : SV_DispatchThreadID) {
+    uint globalIndex = uid.y * _GridWidth + uid.x;
+    if(_Lines[globalIndex].isPhysic != 3) {
+        return;
+    }
+
+    LineData lin = _Lines[globalIndex];
+
+    int _NUM_SEGS = _Lines[globalIndex].realSeg;
+    int _INDEX = 0;
+
+    for(int j=2; j<_NUM_SEGS-1; j++) {
+        float3 Pos = lin.vertices[j].positionWS;
+        float3 PosPlus = lin.vertices[j+1].positionWS;
+        float3 PosMinus = lin.vertices[j-1].positionWS;
+
+        float3 BindPos = lin.vertices[j].positionWSOri;
+        float3 BindPosPlus = lin.vertices[j+1].positionWSOri;
+        float3 BindPosMinus = lin.vertices[j-1].positionWSOri;
+
+        // 计算当前方向向量
+        float3 lastVec = Pos - PosMinus;
+        float3 lastVecBindPos = BindPos - BindPosMinus;
+
+        // 计算初始姿态的方向向量
+        float3 vecBindPos = BindPosPlus - BindPos;
+
+        // 计算全局旋转量（核心约束逻辑）
+        // 计算一个旋转量，让初始姿态的方向 “匹配” 当前姿态的方向。
+        float4 rotGlobal = QuatFromTwoUnitVectors(normalize(lastVecBindPos), normalize(lastVec));
+
+        // 计算约束预期的下一个顶点位置
+        float3 oriPos_i_plus_1_InGlobalFrame = QuaternionRotate(rotGlobal, vecBindPos) + Pos;
+
+        // LocalContraintStiffness局部约束刚度，默认设为0.8
+        // float3 delta = LocalContraintStiffness * (oriPos_i_plus_1_InGlobalFrame - PosPlus);
+        // 计算位置调整量（delta）
+        float3 delta = _GrassParams[0]._LocalConstraintStiffness * (oriPos_i_plus_1_InGlobalFrame - PosPlus);
+
+        if(lin.vertices[j].movable) {
+            Pos -= delta;
+        }
+
+        if(lin.vertices[j+1].movable) {
+            PosPlus += delta;
+        }
+
+        lin.vertices[j].positionWS = Pos;
+        lin.vertices[j+1].positionWS = PosPlus;
+    }
+    _Lines[globalIndex] = lin;
+}

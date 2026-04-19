@@ -1,0 +1,41 @@
+#pragma kernel CSLength
+
+#include "../Common.hlsl"
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<GrassParams> _GrassParams;
+
+int _GridWidth;
+
+[numthreads(16,16,1)]
+void CSLength(uint3 uid : SV_DispatchThreadID) {
+    uint globalIndex = uid.y * _GridWidth + uid.x;
+
+    if(_Lines[globalIndex].isPhysic != 3) {
+        return;
+    }
+
+    LineData lin = _Lines[globalIndex];
+
+    int _NUM_SEGS = _Lines[globalIndex].realSeg;
+
+    for(int j=1; j<_NUM_SEGS; j++) {
+        if(lin.vertices[j].movable) {
+            float RestLength = lin.vertices[j-1].length;
+
+            float3 Delta = lin.vertices[j].positionWS - lin.vertices[j-1].positionWS;
+            float Distance = max(length(Delta), 1e-7);
+
+            // float3 Stretching = Delta / Distance;
+            float3 Stretching = 1 - RestLength / Distance;
+            Delta = Stretching * Delta;
+
+            if(j!=2) {
+                lin.vertices[j-1].positionWS += 0.5 * Delta;
+            }
+            lin.vertices[j].positionWS -= 0.5 * Delta;
+        }
+    }
+
+    _Lines[globalIndex] = lin;
+}

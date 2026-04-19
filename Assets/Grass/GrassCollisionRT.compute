@@ -1,0 +1,73 @@
+#pragma kernel CSCollision
+
+#define _DIST_RANGE 0.125
+#define _DeltaTime 1
+#define _FadeOut 1
+
+// 默认0000
+Texture2D<float4> _PrevCollisionGrass;
+RWTexture2D<float4> _BackCollisionGrass;
+RWTexture2D<float> _MaxCollisionGrass;
+
+int _ColliderCount;
+float4 _Colliders[8];
+int _Fade;
+
+[numthreads(8,8,1)] 
+void CSCollision(uint3 uid : SV_DispatchThreadID)
+{
+    float3 positionWS = float3((float)uid.x, 0.0, (float)uid.y)/8;
+    float4 foreColor = _PrevCollisionGrass[uid.xy];
+    float4 defautDir = float4(0, 0, 0, 0);
+    float  delta = _DeltaTime * _FadeOut; 
+    foreColor.w = max(foreColor.w - 0.001 * _Fade, 0.0);
+    float4 backColor = foreColor;
+    float coWeight = 1.0;
+    
+    // TODO
+    // 记录踩踏最狠一次的位置， 如果后续踩踏没这个狠， 就不在更新
+    // 可以解释为只有weight在某个阈值内，才会被重新赋值
+    for(int c = 0; c < _ColliderCount; c++)
+    {
+        float2 coD  = _Colliders[c].xz - positionWS.xz;
+        float coL = length(_Colliders[c].xz - positionWS.xz);
+        
+        // 这里的_CO_MARGIN指的是smoothstep需要多远衰减到0
+        //float _CO_MARGIN = min(_Colliders[c].w * 2, 1.0);
+        
+        //修改后正好到radius距离正好衰减到0
+        float _CO_MARGIN = _Colliders[c].w;
+
+        // 半径为2 则在半径内全为1， 从2开始衰减， 然后到0
+        //float coWeightTmp = smoothstep(0,  _CO_MARGIN, coL - _Colliders[c].w); 
+        
+        //不管半径为多少，都衰减到0
+        float coWeightTmp = smoothstep(0,  _CO_MARGIN, coL); 
+        
+        if(coWeightTmp < coWeight)
+        {   
+            coWeight = coWeightTmp;
+            float x = _Colliders[c].x;
+            float y = _Colliders[c].y;
+            float z = _Colliders[c].z;
+            backColor = float4(x/128.0f, y/128.0f, z/128.0f, (1.0 - coWeight));
+        }
+    }
+
+    if(backColor.w > foreColor.w) //如果新权重大于旧权重
+    {
+        // 影响还很大的话，不改变方向
+        if(foreColor.w > 0.95)
+        {
+            foreColor.w = backColor.w;
+        }
+        else
+        {
+            foreColor = backColor;
+        }
+    }
+
+    foreColor.w = clamp(foreColor.w, 0.0f, 1.0f);
+    float scaledW = floor(foreColor.w * 255.0) / 255.0f;
+    _BackCollisionGrass[uid.xy] = float4(foreColor.xyz, scaledW);
+}

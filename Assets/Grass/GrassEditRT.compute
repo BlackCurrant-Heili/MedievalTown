@@ -1,0 +1,32 @@
+#pragma kernel CSEdit
+
+#define _DIST_RANGE 0.125
+
+Texture2D<float4> _InitGrass;
+RWTexture2D<float4> _EditGrass;
+
+int _ColliderCount;
+float4 _Colliders[8];
+
+//通过计算着色器处理草叶数据，并根据碰撞体的位置和半径来标记需要被修剪的草叶。
+[numthreads(8,8,1)]
+void CSEdit(uint3 uid : SV_DispatchThreadID)
+{
+    float3 xyz = _InitGrass[uid.xy].xyz;
+    //float3 positionWS = xyz + _PositionScale * float3((float)uid.x - _TextureHalfSize.x, 0.0, (float)uid.y - _TextureHalfSize.y);
+   
+    float3 positionWS = xyz + float3((float)uid.x, 0.0, (float)uid.y)/8;
+
+    //遍历所有碰撞体
+    for(int c = 0; c < _ColliderCount; c++)
+    {
+        float coL = length(_Colliders[c].xyz - positionWS);
+        float coR = _Colliders[c].w;
+
+        if(coL < coR + _DIST_RANGE)
+        {
+            //将 _EditGrass 纹理中对应位置的草叶数据的 w 分量设置为 0.0，表示该草叶需要被修剪。
+            _EditGrass[uid.xy].xyzw = float4(xyz.x, xyz.y, xyz.z, 0.0);
+        }
+    }
+}

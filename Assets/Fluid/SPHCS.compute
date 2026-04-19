@@ -1,0 +1,461 @@
+﻿#pragma kernel ClearHashGrid
+#pragma kernel RecalculateHashGrid
+#pragma kernel BuildNeighbourList
+#pragma kernel ComputeDensityPressure
+#pragma kernel ComputeForces
+#pragma kernel Integrate
+
+// 新增-------------
+#pragma kernel UpdateVelocityFieldWithHash
+RWTexture3D<float4> _VelocityField; // RW
+int _FieldResolution;
+
+Texture2D<float> _TerrainHeightMap;
+SamplerState sampler_TerrainHeightMap;
+float4 _TerrainSize;      
+float4 _TerrainPos;  
+// -------------r
+
+#pragma enable_d3d11_debug_symbols
+
+float CellSize;
+int Dimensions;
+int GridDim; // ⭐ 新增专门的变量
+
+int3 GetCell(float3 position) {
+    return int3(position.x / CellSize, position.y / CellSize, position.z / CellSize);
+}
+int GetGridCellIndex(float3 position) {
+    int3 Cellposition = GetCell(position);
+    return Cellposition.x + GridDim * (Cellposition.y + GridDim * Cellposition.z);
+}
+
+int Hash(int3 cell) {
+    // ⭐ 这里必须用 GridDim 进行钳制和计算！这能让内存访问集中在几 MB 内！
+    int cx = clamp(cell.x, 0, GridDim - 1);
+    int cy = clamp(cell.y, 0, GridDim - 1);
+    int cz = clamp(cell.z, 0, GridDim - 1);
+    return cx + GridDim * (cy + GridDim * cz);
+}
+
+struct Particle {
+    float3 position;
+    float4 Color;
+};
+
+RWStructuredBuffer<Particle> _particles;
+RWStructuredBuffer<int> _neighbourList;
+RWStructuredBuffer<int> _neighbourTracker;
+RWStructuredBuffer<uint> _hashGrid;
+RWStructuredBuffer<uint> _hashGridTracker;
+RWStructuredBuffer<float> _densities;
+RWStructuredBuffer<float> _pressures;
+RWStructuredBuffer<float3> _velocities;
+RWStructuredBuffer<float3> _forces;
+
+int maximumParticlesPerCell;
+float radius;
+float radius2;
+float radius3;
+float radius4;
+float radius5;
+float mass;
+float mass2;
+float gasConstant;
+float restDensity;
+float viscosityCoefficient;
+float damping;
+float dt;
+float3 gravity;
+float epsilon;
+float pi;
+float stiffness;
+float3 _ColliderPos;
+float _ColliderRadius;
+bool _isMagic;
+float3 _isMagicPosition;
+
+[numthreads(100,1,1)]
+void ClearHashGrid(uint3 id : SV_DispatchThreadID) {
+    // ⭐ 防止即使计算正确也偶发的数组越界
+    uint totalCells = GridDim * GridDim * GridDim;
+    if (id.x < totalCells) {
+        _hashGridTracker[id.x] = 0;
+    }
+}
+
+[numthreads(100,1,1)]//TODO使用3x3x3矩阵
+void RecalculateHashGrid(uint3 id:SV_DispatchThreadID) {
+    int previousCount = 0;
+    const int hashCellIdx = Hash(GetCell(_particles[id.x].position));
+    InterlockedAdd(_hashGridTracker[hashCellIdx], 1, previousCount);
+    if (previousCount >= maximumParticlesPerCell) {
+        return;
+    }
+    _hashGrid[hashCellIdx * maximumParticlesPerCell + previousCount] = id.x;
+}
+
+void GetNearbyKeys(int3 originIndex,float3 position, inout int nearbyKeys[8]) {
+    int3 nearbyBucketIndices[8];
+    for (int i = 0; i < 8; i++) {
+        nearbyBucketIndices[i] = originIndex;
+    }
+
+    if ((originIndex.x + 0.5f) * CellSize <= position.x) {
+        nearbyBucketIndices[4].x += 1;
+        nearbyBucketIndices[5].x += 1;
+        nearbyBucketIndices[6].x += 1;
+        nearbyBucketIndices[7].x += 1;
+    }
+
+    else {
+        nearbyBucketIndices[4].x -= 1;
+        nearbyBucketIndices[5].x -= 1;
+        nearbyBucketIndices[6].x -= 1;
+        nearbyBucketIndices[7].x -= 1;
+    }
+    if ((originIndex.y + 0.5f) * CellSize <= position.y) {
+        nearbyBucketIndices[2].y += 1;
+        nearbyBucketIndices[3].y += 1;
+        nearbyBucketIndices[6].y += 1;
+        nearbyBucketIndices[7].y += 1;
+    }
+    else {
+        nearbyBucketIndices[2].y -= 1;
+        nearbyBucketIndices[3].y -= 1;
+        nearbyBucketIndices[6].y -= 1;
+        nearbyBucketIndices[7].y -= 1;
+    }
+    if ((originIndex.z + 0.5f) * CellSize <= position.z) {
+        nearbyBucketIndices[1].z += 1;
+        nearbyBucketIndices[3].z += 1;
+        nearbyBucketIndices[5].z += 1;
+        nearbyBucketIndices[7].z += 1;
+    }
+    else {
+        nearbyBucketIndices[1].z -= 1;
+        nearbyBucketIndices[3].z -= 1;
+        nearbyBucketIndices[5].z -= 1;
+        nearbyBucketIndices[7].z -= 1;
+    }
+
+    for (int j = 0; j < 8; j++) {
+        int3 nbcellIndex = nearbyBucketIndices[j];
+        // ⭐ 必须使用 GridDim 进行边界检查，绝不能用 Dimensions！
+        if (nbcellIndex.x < 0 || nbcellIndex.x >= GridDim || 
+            nbcellIndex.y < 0 || nbcellIndex.y >= GridDim || 
+            nbcellIndex.z < 0 || nbcellIndex.z >= GridDim) {
+            nearbyKeys[j] = -1;
+        }
+        else {
+            nearbyKeys[j] = Hash(nearbyBucketIndices[j]);
+        }
+    }
+}
+
+[numthreads(100, 1, 1)]
+void BuildNeighbourList(uint3 id : SV_DispatchThreadID) {
+    _neighbourTracker[id.x] = 0;
+    const int3 cell = GetCell(_particles[id.x].position);
+    int cells[8];
+    GetNearbyKeys(cell, _particles[id.x].position, cells);
+
+    for (uint j = 0; j < 8; j++) {
+        if (cells[j] == -1) continue; // Grid does not contain cell.
+        const uint numberOfParticlesInCell = min(_hashGridTracker[cells[j]], maximumParticlesPerCell); ;
+        for (uint index = 0; index < numberOfParticlesInCell; index++) {
+            const uint potentialNeighbour = _hashGrid[cells[j] * maximumParticlesPerCell + index];
+            if (potentialNeighbour == id.x) continue;
+            const float3 v = _particles[potentialNeighbour].position - _particles[id.x].position;
+            if (dot(v, v) < radius2) {
+                // Use squared length (= dot) instead of length for performance.
+                _neighbourList[id.x * maximumParticlesPerCell * 8 + _neighbourTracker[id.x]++] = potentialNeighbour;
+            }
+        }
+    }
+    // n. The Neighbouring-list should be n-particles big, each index containing a list of each particles neighbours in radius r.
+}
+
+float Wpoly6Kernel(float distanceSquared) {
+    float x = 1.0f - distanceSquared / radius2;
+    return 315.f / (64.f * pi * radius3) * x * x * x;
+}
+
+[numthreads(100,1,1)]//合并
+void ComputeDensityPressure(uint3 id :SV_DispatchThreadID) {
+    float3 origin = _particles[id.x].position;
+    float sum = Wpoly6Kernel(0); 
+    for(int j = 0;j <_neighbourTracker[id.x]; j++) {
+        int neighbourIndex = _neighbourList[id.x*maximumParticlesPerCell*8 +j];
+        const float3 diff = origin - _particles[neighbourIndex].position;
+        float distanceSquared = dot(diff,diff);
+        sum += Wpoly6Kernel(distanceSquared);
+    }
+    //computeDensity
+    //     //Debug
+    // _densities[id.x] = _neighbourTracker[id.x];
+    //TodO presure
+    _densities[id.x] = sum*mass + 0.000001f;
+    _densities[id.x] = max(0.001f, sum * mass);
+    _pressures[id.x] = max(0.0f, gasConstant * (_densities[id.x] - restDensity));
+}
+
+[numthreads(100, 1, 1)]//WithSmallSteps
+void ComputeWCSPHDensityPressure(uint3 id :SV_DispatchThreadID) {
+    float3 origin = _particles[id.x].position;
+    float sum = 0.f;
+    for (int j = 0; j < _neighbourTracker[id.x]; j++) {
+        int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+        const float3 diff = origin - _particles[neighbourIndex].position;
+        float distanceSquared = dot(diff, diff);
+        sum += Wpoly6Kernel(distanceSquared);
+    }
+
+    _densities[id.x] = sum * mass + 0.000001f;
+    _densities[id.x] = max(restDensity, _densities[id.x]);
+    //_pressures[id.x] = gasConstant * (_densities[id.x] - restDensity);
+    _pressures[id.x] = stiffness * pow((_densities[id.x] / restDensity - 1), 7);
+}
+
+float SpikyKernelFirstDerivative(float distance) {
+    float x = 1.0f - distance / radius;
+    return -45.0f / (pi * radius4) * x * x;
+}
+
+float SpikyKernelSecondDerivative(float distance) {
+    float x = 1.0f - distance / radius;
+    return 90.0f / (pi * radius5) * x;
+}
+
+float3 SpikyKernelGradient(float distance, float3 directionFromCenter) {
+    return SpikyKernelFirstDerivative(distance) * directionFromCenter;
+}
+
+[numthreads(100,1,1)]
+void ComputeForces(uint3 id :SV_DispatchThreadID) {
+    _forces[id.x] = float3(0, 0, 0);
+    const float particleDensity2 = _densities[id.x] * _densities[id.x];
+    for (int j = 0; j < _neighbourTracker[id.x]; j++) {
+        const int neighbourIndex = _neighbourList[id.x * maximumParticlesPerCell * 8 + j];
+
+        // length耗时耗力
+        // const float distance = length(_particles[id.x].position - _particles[neighbourIndex].position);
+
+        // ⭐ 优化1：先求差值向量
+        float3 diff = _particles[id.x].position - _particles[neighbourIndex].position;
+
+        // ⭐ 优化2：用 dot 代替 length 算平方距离
+        float distSq = dot(diff, diff);
+
+        // ⭐ 防止完美重叠！如果距离过近，人为加入微小的排斥力偏移
+        if (distSq <= 0.000001f && id.x != neighbourIndex) {
+            // 用粒子的 ID 制造一个伪随机的微弱偏移
+            diff = float3((id.x % 3) - 1.0f, (id.x % 5) - 2.0f, (id.x % 7) - 3.0f) * 0.01f;
+            distSq = dot(diff, diff);
+        }
+
+        if (distSq > 0.000001f && distSq < radius2) {
+            float distance = sqrt(distSq); 
+            float3 direction = diff / distance;
+
+            _forces[id.x] -= mass2 * (_pressures[id.x] / particleDensity2 + _pressures[neighbourIndex] / (_densities[neighbourIndex] * _densities[neighbourIndex])) * SpikyKernelGradient(distance, direction);
+            _forces[id.x] += viscosityCoefficient * mass2 * ((_velocities[neighbourIndex] - _velocities[id.x]) / _densities[neighbourIndex]) * SpikyKernelSecondDerivative(distance);
+        }
+    }
+
+    // **新增：碰撞体力**
+    float3 colliderDir = _particles[id.x].position - _ColliderPos;
+    float colliderDist = length(colliderDir);
+
+    if (colliderDist < _ColliderRadius + radius) {
+        // 归一化方向
+        if (colliderDist > 0.001f) {
+            colliderDir /= colliderDist;
+        } else {
+            colliderDir = float3(0, 1, 0); // 避免除以0
+        }
+
+        // 穿透深度
+        float penetration = _ColliderRadius + radius - colliderDist;
+
+        // **排斥力**（类似弹簧力，可以调节刚度）
+        float springForce = 1000.0f * penetration;
+        _forces[id.x] += springForce * colliderDir;
+
+        // **阻尼力**（基于相对速度）
+        float3 relativeVel = _velocities[id.x];
+        float dampingForce = -dot(relativeVel, colliderDir) * 20.0f; // 阻尼系数可以调节
+        _forces[id.x] += dampingForce * colliderDir;
+    }
+
+    _forces[id.x] += gravity * mass;
+}
+
+[numthreads(100,1,1)]
+void Integrate(uint3 id :SV_DispatchThreadID) {
+    Particle particle = _particles[id.x];
+    _velocities[id.x] += dt* _forces[id.x]/mass;
+
+    // ⭐【关键保护】：限制粒子的最大速度，防止物理爆炸导致坐标无限大
+    float speed = length(_velocities[id.x]);
+    if (speed > 100.0f) {
+        _velocities[id.x] = (_velocities[id.x] / speed) * 100.0f;
+    }
+
+    particle.position += dt* _velocities[id.x];
+
+    float3 velocity = _velocities[id.x];
+
+    float3 colliderDir = particle.position - _ColliderPos;
+    float colliderDist = length(colliderDir);
+
+    if (colliderDist < _ColliderRadius + epsilon) {
+        // 归一化碰撞法线
+        if (colliderDist > 0.001f) {
+            colliderDir /= colliderDist;
+        } else {
+            colliderDir = float3(0, 1, 0);
+        }
+
+        // 将粒子推到碰撞体表面
+        particle.position = _ColliderPos + colliderDir * (_ColliderRadius + epsilon);
+
+        // 速度反弹（弹性碰撞）
+        // 法向速度分量
+        float vn = dot(velocity, colliderDir);
+
+        if(vn < 0) {
+            // 只处理向内的速度
+            // 切向速度分量
+            float3 vt = velocity - vn * colliderDir;
+
+            // 反弹（考虑能量损失）
+            float restitution = 0.8f; // 恢复系数：0.0（完全非弹性）到1.0（完全弹性）
+            float friction = 0.1f;    // 摩擦系数
+
+            // 更新速度：法向反弹 + 切向摩擦
+            velocity = vt * (1.0f - friction) - vn * restitution * colliderDir;
+        }
+    }
+
+    // ⭐【关键保护】：防止没有传入Terrain时发生的除以0错误 (NaN)
+    if (_TerrainSize.x > 0.1f) {
+        float u = (particle.position.x - _TerrainPos.x) / _TerrainSize.x;
+        float v = (particle.position.z - _TerrainPos.z) / _TerrainSize.z;
+        u = clamp(u, 0.0f, 1.0f);
+        v = clamp(v, 0.0f, 1.0f);
+
+        float dx = 0.1f;
+        float centerHeight  = _TerrainHeightMap.SampleLevel(sampler_TerrainHeightMap, float2(u, v), 0).r * _TerrainSize.y;
+        float leftHeight  = _TerrainHeightMap.SampleLevel(sampler_TerrainHeightMap, float2(u-dx, v), 0).r * _TerrainSize.y;
+        float rightHeight = _TerrainHeightMap.SampleLevel(sampler_TerrainHeightMap, float2(u+dx, v), 0).r * _TerrainSize.y;
+        float backHeight  = _TerrainHeightMap.SampleLevel(sampler_TerrainHeightMap, float2(u, v-dx), 0).r * _TerrainSize.y;
+        float frontHeight = _TerrainHeightMap.SampleLevel(sampler_TerrainHeightMap, float2(u, v+dx), 0).r * _TerrainSize.y;
+
+        float3 terrainNormal = normalize(float3(leftHeight - rightHeight, 2.0f * dx, backHeight - frontHeight));
+        float terrainSurface = centerHeight + epsilon;
+
+        if (particle.position.y < terrainSurface) {
+            particle.position.y = terrainSurface;
+            float vn = dot(velocity, terrainNormal);
+            if (vn < 0) {
+                float3 velocityNormal = vn * terrainNormal;
+                float3 velocityTangent = velocity - velocityNormal;
+                velocity = -velocityNormal * 0.2f + velocityTangent * 0.9f;
+            }
+            velocity.y = max(velocity.y, 0.0f);
+        }
+    } else {
+        // 如果没有地形，加一个最基础的地面碰撞，防止粒子掉入深渊！
+        if (particle.position.y < epsilon) {
+            particle.position.y = epsilon;
+            if (velocity.y < 0) velocity.y *= damping;
+        }
+    }
+
+    // 4. 其他边界（X和Z方向）
+    float boxSize = float(Dimensions) - 1.0f;
+
+    // X边界
+    if (_particles[id.x].position.x - epsilon < 0.0f) {
+        if (velocity.x < 0) velocity.x *= damping; // 向左撞墙才反转
+        particle.position.x = epsilon;
+    }
+    else if (_particles[id.x].position.x > boxSize - epsilon) {
+        if (velocity.x > 0) velocity.x *= damping; // 向右撞墙才反转
+        particle.position.x = Dimensions - 1 - epsilon;
+    }
+
+    // Z边界
+    if (_particles[id.x].position.z - epsilon < 0.0f) {
+        if (velocity.z < 0) velocity.z *= damping;
+        particle.position.z = epsilon;
+    }
+    else if (_particles[id.x].position.z > boxSize - epsilon) {
+        if (velocity.z > 0) velocity.z *= damping;
+        particle.position.z = boxSize - epsilon;
+    }
+
+    if (_particles[id.x].position.y > boxSize - epsilon) {
+        if (velocity.y > 0) velocity.y *= damping;
+        particle.position.y = boxSize - epsilon;
+    }
+    _velocities[id.x] = velocity;
+    _particles[id.x] = particle;
+}
+
+[numthreads(8,8,8)]
+void UpdateVelocityFieldWithHash(uint3 id : SV_DispatchThreadID) {
+    // ⭐【必需】：防止分辨率不是 8 的倍数时越界执行
+    if (id.x >= (uint)_FieldResolution || id.y >= (uint)_FieldResolution || id.z >= (uint)_FieldResolution) return;
+
+    // 1. 体素中心世界坐标
+    float3 voxelCenter = (float3(id) + 0.5f) / _FieldResolution * (Dimensions - 1);
+
+    // 2. 确定影响半径（1个体素）覆盖的哈希格子范围
+    float influenceRadius = radius * 2;
+    int3 minCell = GetCell(voxelCenter - influenceRadius);
+    int3 maxCell = GetCell(voxelCenter + influenceRadius);
+
+    // ⭐ 限制哈希网格边界：这里也必须是 GridDim！
+    int maxGridIndex = GridDim - 1; // 绝对不能是 Dimensions - 1
+    minCell = max(minCell, int3(0,0,0));
+    maxCell = min(maxCell, int3(maxGridIndex, maxGridIndex, maxGridIndex));
+
+    // 5. 遍历粒子（与之前相同）
+    float3 weightedVelocity = 0.0f;
+    float totalWeight = 0.0f;
+
+    for (int x = minCell.x; x <= maxCell.x; x++)
+    for (int y = minCell.y; y <= maxCell.y; y++)
+    for (int z = minCell.z; z <= maxCell.z; z++) {
+        int cellHash = Hash(int3(x,y,z));
+        if (cellHash < 0 || cellHash >= Dimensions * Dimensions * Dimensions) continue;
+        uint particleCount = min(_hashGridTracker[cellHash], maximumParticlesPerCell);
+        for (uint i = 0; i < particleCount; i++) {
+            uint particleIdx = _hashGrid[cellHash * maximumParticlesPerCell + i];
+            float3 pos = _particles[particleIdx].position;
+
+            float3 offset = pos - voxelCenter;
+
+            // 优化：先算平方！
+            float distSq = dot(offset, offset);
+            float influenceRadiusSq = influenceRadius * influenceRadius; // 可以在循环外面预计算
+
+            // 用平方距离进行筛选，省掉几百万次多余的开方
+            if (distSq < influenceRadiusSq) {
+                float dist = sqrt(distSq); // 只在这里开方
+                float weight = 1.0f - dist / influenceRadius; // 线性衰减
+                weightedVelocity += _velocities[particleIdx] * weight;
+                totalWeight += weight;
+            }
+        }
+    }
+
+    // // 5. 写入速度场
+    _VelocityField[id] = totalWeight > 0.0f ? float4(weightedVelocity / totalWeight, 1.0) : float4(0,0,0,0);
+}
+
+[numthreads(100,1,1)]
+void BuildCollider() {
+}

@@ -1,0 +1,39 @@
+#pragma kernel CSGlobal
+
+#include "../Common.hlsl"
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<LineData> _LinesOri;
+RWStructuredBuffer<GrassParams> _GrassParams;
+
+int _GridWidth;
+
+[numthreads(16,16,1)]
+void CSGlobal(uint3 uid : SV_DispatchThreadID) {
+    uint globalIndex = uid.y * _GridWidth + uid.x;
+
+    if(_Lines[globalIndex].isPhysic != 3) {
+        return;
+    }
+
+    LineData lin = _Lines[globalIndex];
+
+    int _NUM_SEGS = _Lines[globalIndex].realSeg;
+    int _INDEX = 0;
+
+    for(int j=0; j<_NUM_SEGS; j++) {
+        if(lin.vertices[j].movable) {
+            // GlobalConstraintRange(全局约束范围)默认设为0.3 
+            // float GlobalShapeMatchingEffectiveRange = GlobalConstraintRange * NumVerticesInstrand;
+            float GlobalShapeMatchingEffectiveRange = 0.3 * _NUM_SEGS;
+            if(_INDEX < GlobalShapeMatchingEffectiveRange) {
+                // CurPos += GlobalConstraintStiffness * (InitialPos - CurPos);
+                // GlobalConstraintStiffness(全局约束刚度)默认设为0.01，刚度越高，Strand越不易弯曲
+                lin.vertices[j].positionWS += _GrassParams[0]._Stiffness * (lin.vertices[j].positionWSOri - lin.vertices[j].positionWS);
+                _INDEX += 1;
+            }
+        }
+    }
+
+    _Lines[globalIndex] = lin;
+}

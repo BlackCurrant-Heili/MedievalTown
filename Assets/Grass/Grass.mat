@@ -1,0 +1,76 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Grass
+  m_Shader: {fileID: 4800000, guid: b929d93c179671143b1ca821770991ad, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 1
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _BaseColorTex:
+        m_Texture: {fileID: 2800000, guid: dd39f83475c73614b98821cf3f987485, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _DisplacementTex:
+        m_Texture: {fileID: 2800000, guid: 8818a9de7d343e04e8631f46fe0ae256, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _HairColorTex:
+        m_Texture: {fileID: 2800000, guid: 23d12effdac885b4cb6a8df024cce3bf, type: 3}
+        m_Scale: {x: 0.73, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _NormalTex:
+        m_Texture: {fileID: 2800000, guid: 49d9935e0a073d34cb7672b280f6db35, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _OpacityTex:
+        m_Texture: {fileID: 2800000, guid: 4add2d85c7242384da448481830d90ad, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _RoughnessTex:
+        m_Texture: {fileID: 2800000, guid: 31d8877563a95f84ea961c100a84b412, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _SpecularTex:
+        m_Texture: {fileID: 2800000, guid: e16599535e8ec24428cc2ff148189d81, type: 3}
+        m_Scale: {x: 0.92, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _AlphaCutoff: 0
+    - _AmbientStrength: 0.081
+    - _AtlasColumns: 8
+    - _AtlasRows: 1
+    - _Fold: 1
+    - _NoiseIntensity: 0.355
+    - _NoiseScale: 0.62
+    - _NormalScale: 1
+    - _PrimaryHighlight: 0.04
+    - _RimIntensity: 0.044
+    - _Roughness: 0.8
+    - _RoughnessScale: 1
+    - _SecondaryHighlight: 0.053
+    - _WShapeIntensity: 1
+    - _Width: 1
+    m_Colors:
+    - _BottomColor: {r: 0.049999982, g: 0.24999997, b: 0.079999976, a: 1}
+    - _DeadColor: {r: 0.7, g: 0.5, b: 0.19999996, a: 1}
+    - _TopColor: {r: 0.5, g: 0.9, b: 0.29999998, a: 1}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

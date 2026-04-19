@@ -1,0 +1,92 @@
+﻿// FluidDepthBilateralFilter.compute
+#pragma kernel AtrousWaveletFilter
+#pragma kernel CopyDepth
+
+// 深度图和输出
+Texture2D<float2> _DepthTexture;
+RWTexture2D<float2> _OutputTexture;
+
+// 滤波参数
+float _SigmaSpatial;      // 空间域标准差 (通常1.0-3.0)
+float _SigmaDepth;        // 值域标准差 (深度差异敏感度，通常0.1-1.0)
+int _StepSize;            // 当前步长 (1, 2, 4, 8...)
+int2 _TextureSize;        // 纹理尺寸
+
+// 3x3核权重 (高斯核，sigma=1.0)
+static const float kWeights[3][3] = { {
+        0.0625, 0.125, 0.0625
+    }, {
+        0.125,  0.25,  0.125
+    }, {
+        0.0625, 0.125, 0.0625
+    }
+};
+
+// 核偏移
+static const int2 kOffsets[3][3] = { {
+        int2(-1, -1), int2(0, -1), int2(1, -1)
+    }, {
+        int2(-1,  0), int2(0,  0), int2(1,  0)
+    }, {
+        int2(-1,  1), int2(0,  1), int2(1,  1)
+    }
+};
+
+[numthreads(8, 8, 1)]
+void AtrousWaveletFilter(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= _TextureSize.x || id.y >= _TextureSize.y) return;
+
+    int2 centerCoord = int2(id.xy);
+
+    // ✅ 修复：直接读取 X 通道的线性深度
+    float centerDepth = _DepthTexture[centerCoord].x;
+
+    if (centerDepth <= 0.001) {
+        _OutputTexture[centerCoord] = float2(0, 0);
+        return;
+    }
+
+    float sumWeight = 0;
+    float sumDepth = 0;
+
+    [unroll]
+    for (int i = 0; i < 3; i++) {
+        [unroll]
+        for (int j = 0; j < 3; j++) {
+            int2 sampleCoord = centerCoord + kOffsets[i][j] * _StepSize;
+            sampleCoord = clamp(sampleCoord, int2(0,0), int2(_TextureSize.x-1, _TextureSize.y-1));
+
+            // ✅ 修复：读取 X 通道
+            float sampleDepth = _DepthTexture[sampleCoord].x;
+
+            if (sampleDepth <= 0.001) continue;
+
+            float spatialWeight = kWeights[i][j];
+
+            // 这里 depthDiff 现在的单位是“米”！
+            // 所以你在C#端传 _SigmaDepth 时，应设为 0.1 到 0.5 之间（即容忍10cm到50cm的粒子深度差融合）
+            float depthDiff = sampleDepth - centerDepth;
+            float rangeWeight = exp(-(depthDiff * depthDiff) / (2.0 * _SigmaDepth * _SigmaDepth));
+
+            float weight = spatialWeight * rangeWeight;
+            sumWeight += weight;
+            sumDepth += weight * sampleDepth;
+        }
+    }
+
+    if (sumWeight > 0.001) {
+        // ✅ 修复：将平滑后的线性深度写回 X 通道
+        _OutputTexture[centerCoord] = float2(sumDepth / sumWeight, 0);
+    } else {
+        _OutputTexture[centerCoord] = float2(centerDepth, 0);
+    }
+}
+
+// 简单的Copy Kernel，用于Ping-Pong缓冲
+[numthreads(8, 8, 1)]
+void CopyDepth(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= _TextureSize.x || id.y >= _TextureSize.y)
+    return;
+
+    _OutputTexture[int2(id.xy)] = _DepthTexture[int2(id.xy)];
+}

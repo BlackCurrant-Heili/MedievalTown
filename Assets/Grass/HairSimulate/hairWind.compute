@@ -1,0 +1,60 @@
+#pragma kernel CSWind
+
+#include "../Common.hlsl"
+
+RWStructuredBuffer<LineData> _Lines;
+RWStructuredBuffer<GrassParams> _GrassParams;
+Texture2D<float4> _WindNoiseTex;
+Texture3D<float4> _VelocityField;      // ✅ 3D速度场
+
+int _SphDimensions;
+int _SphResolution;
+float _Time;
+float _SphCellSize;
+int _GridWidth;
+
+[numthreads(16,16,1)]
+void CSWind(uint3 uid : SV_DispatchThreadID) {
+    uint globalIndex = uid.y * _GridWidth + uid.x;
+
+    if(_Lines[globalIndex].isPhysic != 3) {
+        return;
+    }
+
+    LineData lin = _Lines[globalIndex];
+
+    // 不要轻易改动
+    int _NUM_SEGS = _Lines[globalIndex].realSeg;
+
+    for(int j=0; j<_NUM_SEGS; j++) {
+        if(lin.vertices[j].movable) {
+            float3 positionWS = lin.vertices[j].positionWS;
+            float weight = lin.vertices[j].weight;
+
+            // 1. 世界坐标 → 体素索引（整数）
+            float3 sphWorldSize = _SphDimensions * _SphCellSize * float3(1,1,1);
+            float3 voxelCoord = positionWS / sphWorldSize * _SphResolution;
+
+            // 2. 钳制到合法范围
+            int3 voxelIndex = clamp(int3(voxelCoord), 0, _SphResolution - 1);
+
+            // 3. Load读取（无插值，单次内存访问）
+            float3 fluidVelocity = _VelocityField.Load(int4(voxelIndex, 0)).xyz;
+
+            // ✅ Step 3: 将流体速度作为风力（叠加到原有风）
+            float3 rand = (rand3(positionWS) - 0.5) * 2;
+
+            // 流体主导方向 + 噪声扰动
+            float3 waveRipplingSample = float3(
+                fluidVelocity.x + (rand.x * _GrassParams[0]._WindBase), 
+                fluidVelocity.y + (rand.y * _GrassParams[0]._WindBase), 
+                fluidVelocity.z + (rand.z * _GrassParams[0]._WindBase));
+
+            // 应用力（强度可调）
+            lin.vertices[j].positionWS -= pow((sin(_Time) + rand.y * 2) / 2, 2) * 
+            waveRipplingSample * _GrassParams[0]._WindSpeed * weight * weight * 0.0002f;
+        }
+    }
+
+    _Lines[globalIndex] = lin;
+}
