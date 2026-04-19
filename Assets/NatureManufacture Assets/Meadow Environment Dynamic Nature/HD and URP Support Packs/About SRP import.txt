@@ -1,0 +1,4 @@
+Please import SRP packs only if your project is using HD or URP.
+If you import this to standard project you will get errors.
+Import proper RP compatibility pack to proper engine version for Unity 6 URP 17 please use our 17 Unity 6 Meadow environment compatibility pack.
+If you use higher RP versions please use atm 17 support packs. 
